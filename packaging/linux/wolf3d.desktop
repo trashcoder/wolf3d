@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wolfenstein 3D
+Comment=Play Wolfenstein 3D with legally obtained game data
+Exec=wolf3d
+Icon=wolf3d
+Categories=Game;ActionGame;
+Terminal=false

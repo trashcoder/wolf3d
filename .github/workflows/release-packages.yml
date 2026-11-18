@@ -1,0 +1,239 @@
+name: Release packages
+
+on:
+  # Creating a version tag is the explicit signal that the port is ready for
+  # its final release builds. Pull requests and ordinary pushes never build.
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# setup-sdl@v1 declares the retired Node 20 runtime; upstream main declares Node 24.
+jobs:
+  linux:
+    name: Linux AppImage (x86-64)
+    runs-on: ubuntu-24.04
+    # Build inside the older userspace so the AppImage's ELF dependencies do
+    # not require the runner's newer glibc. AppImage can bundle SDL2, not glibc.
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential ca-certificates cmake curl file git pkg-config
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: libsdl-org/setup-sdl@main
+        id: sdl
+        with:
+          version: 2.32.10
+          build-type: Release
+          install-linux-dependencies: true
+      - name: Build final release executable
+        env:
+          SDL2_LIB_DIR: ${{ steps.sdl.outputs.prefix }}/lib
+        run: cargo build --release --locked
+      - name: Check the glibc compatibility baseline
+        shell: bash
+        run: |
+          required_glibc="$(readelf --version-info target/release/wolf3d \
+            | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n 1 | cut -d_ -f2)"
+          if [[ -z "$required_glibc" ]]; then
+            echo "Could not determine the executable's glibc requirement." >&2
+            exit 1
+          fi
+          if ! dpkg --compare-versions "$required_glibc" le 2.35; then
+            echo "Executable requires glibc $required_glibc; the AppImage baseline is 2.35." >&2
+            exit 1
+          fi
+          echo "Executable glibc requirement: $required_glibc (baseline 2.35)"
+      - name: Install AppImage packaging tools
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/appimage-tools"
+          curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+            -o "$RUNNER_TEMP/appimage-tools/linuxdeploy"
+          curl -fsSL https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage \
+            -o "$RUNNER_TEMP/appimage-tools/appimagetool"
+          chmod +x "$RUNNER_TEMP/appimage-tools/linuxdeploy" "$RUNNER_TEMP/appimage-tools/appimagetool"
+          echo "$RUNNER_TEMP/appimage-tools" >> "$GITHUB_PATH"
+      - name: Package AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          LD_LIBRARY_PATH: ${{ steps.sdl.outputs.prefix }}/lib
+        run: bash scripts/package-linux-appimage.sh
+      - name: Smoke-check packaged AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          appimage="$(find dist -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          "$appimage" --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolf3d-linux-x86_64
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  windows:
+    name: Windows ZIP (x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: libsdl-org/setup-sdl@main
+        id: sdl
+        with:
+          version: 2.32.10
+          build-type: Release
+      - name: Build final release executable
+        env:
+          SDL2_LIB_DIR: ${{ steps.sdl.outputs.prefix }}\lib
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Package ZIP
+        env:
+          SDL2_DLL_PATH: ${{ steps.sdl.outputs.prefix }}\bin\SDL2.dll
+        run: ./scripts/package-windows.ps1
+      - name: Smoke-check packaged Windows executable
+        shell: pwsh
+        run: |
+          $executable = Join-Path $PWD "dist/windows-x64/wolf3d.exe"
+          if (!(Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Packaged executable not found: $executable" }
+          & $executable --help
+          if ($LASTEXITCODE -ne 0) { throw "Packaged executable exited with code $LASTEXITCODE" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolf3d-windows-x64
+          path: dist/wolf3d-windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS Universal DMG
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: libsdl-org/setup-sdl@main
+        id: sdl
+        with:
+          version: 2.32.10
+          build-type: Release
+          cmake-arguments: >-
+            -DSDL_FRAMEWORK=ON
+            -DCMAKE_OSX_ARCHITECTURES=x86_64\;arm64
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Locate universal SDL2 framework
+        id: framework
+        shell: bash
+        env:
+          SDL_PREFIX: ${{ steps.sdl.outputs.prefix }}
+        run: |
+          framework="$(find "$SDL_PREFIX" -type d -name SDL2.framework -print -quit)"
+          test -n "$framework"
+          echo "directory=$(dirname "$framework")" >> "$GITHUB_OUTPUT"
+      - name: Build final release executables
+        env:
+          SDL2_FRAMEWORK_DIR: ${{ steps.framework.outputs.directory }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+      - name: Prepare optional macOS signing and notarization
+        id: macos-auth
+        shell: bash
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_API_KEY_BASE64: ${{ secrets.MACOS_NOTARY_API_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          signing_requested=0
+          for value in "$DEVELOPER_ID_P12_BASE64" "$DEVELOPER_ID_P12_PASSWORD"; do
+            if [[ -n "$value" ]]; then signing_requested=1; fi
+          done
+          notary_requested=0
+          for value in "$NOTARY_API_KEY_BASE64" "$NOTARY_KEY_ID" "$NOTARY_ISSUER_ID"; do
+            if [[ -n "$value" ]]; then notary_requested=1; fi
+          done
+
+          if [[ "$signing_requested" == 0 ]]; then
+            if [[ "$notary_requested" == 1 ]]; then
+              echo "Notarization credentials require the Developer ID certificate secrets too." >&2
+              exit 1
+            fi
+            echo "::warning::No Developer ID secrets configured; the macOS package will be unsigned and unnotarized."
+            exit 0
+          fi
+          if [[ -z "$DEVELOPER_ID_P12_BASE64" || -z "$DEVELOPER_ID_P12_PASSWORD" ]]; then
+            echo "Both Developer ID certificate secrets are required for signing." >&2
+            exit 1
+          fi
+
+          keychain="$RUNNER_TEMP/wolf3d-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          certificate="$RUNNER_TEMP/wolf3d-developer-id.p12"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate"
+          chmod 600 "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -f pkcs12 \
+            -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          rm -f "$certificate"
+
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/Developer ID Application:/ { print $2; exit }')"
+          if [[ -z "$identity" ]]; then
+            echo "The imported certificate has no Developer ID Application identity." >&2
+            exit 1
+          fi
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+          if [[ "$notary_requested" == 1 ]]; then
+            if [[ -z "$NOTARY_API_KEY_BASE64" || -z "$NOTARY_KEY_ID" || -z "$NOTARY_ISSUER_ID" ]]; then
+              echo "All three App Store Connect API key secrets are required for notarization." >&2
+              exit 1
+            fi
+            api_key="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
+            printf '%s' "$NOTARY_API_KEY_BASE64" | base64 --decode > "$api_key"
+            chmod 600 "$api_key"
+            xcrun notarytool store-credentials wolf3d-notary \
+              --key "$api_key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+            rm -f "$api_key"
+            echo "notary_profile=wolf3d-notary" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::The macOS app will be signed but not notarized; Gatekeeper may still warn."
+          fi
+      - name: Package universal DMG
+        env:
+          SDL2_FRAMEWORK_BUNDLE: ${{ steps.framework.outputs.directory }}
+          WOLF3D_X86_64_BIN: target/x86_64-apple-darwin/release/wolf3d
+          WOLF3D_ARM64_BIN: target/aarch64-apple-darwin/release/wolf3d
+          MACOS_CODESIGN_IDENTITY: ${{ steps.macos-auth.outputs.identity }}
+          MACOS_NOTARY_PROFILE: ${{ steps.macos-auth.outputs.notary_profile }}
+        run: bash scripts/package-macos-dmg.sh
+      - name: Remove temporary macOS signing keychain
+        if: always()
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/wolf3d-signing.keychain-db"
+          if [[ -f "$keychain" ]]; then security delete-keychain "$keychain"; fi
+      - name: Smoke-check packaged universal macOS executable
+        run: '"dist/Wolfenstein 3D.app/Contents/MacOS/wolf3d" --help'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolf3d-macos-universal
+          path: dist/wolf3d-macos-universal.dmg
+          if-no-files-found: error

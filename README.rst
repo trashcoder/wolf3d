@@ -1,6 +1,18 @@
 Wolfenstein 3D
 ==============
 
+Rust / SDL2 port
+----------------
+
+A Rust migration for current Linux, Windows, and macOS systems is in progress.
+The port requires legally obtained original game data, which is not included.
+Current controls, data-file locations, and migration status are documented in
+``PORTING.md``. The release workflow creates cross-platform packages only after
+a version tag is pushed, keeping ordinary development changes free of builds.
+
+Historical source release
+-------------------------
+
 The original source release was made using the ``DEICE.EXE``
 installer (DeIce) in the root directory.  (Basically a way to
 split self-extracting zip files over multiple floppy disks.)

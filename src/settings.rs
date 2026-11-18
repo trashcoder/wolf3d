@@ -14,21 +14,9 @@ static MOUSE_SENSITIVITY: AtomicU8 = AtomicU8::new(DEFAULT_MOUSE_SENSITIVITY);
 static MOUSE_INPUT_ENABLED: AtomicBool = AtomicBool::new(true);
 static CONTROLLER_INPUT_ENABLED: AtomicBool = AtomicBool::new(true);
 static SHOW_HISTORICAL_SYMBOLS: AtomicBool = AtomicBool::new(false);
-static VIDEO_FILTER: AtomicU8 = AtomicU8::new(VideoFilter::Classic as u8);
 static WORLD_RENDERER: AtomicU8 = AtomicU8::new(WorldRenderer::Original as u8);
 static RENDER_RESOLUTION: AtomicU8 = AtomicU8::new(RenderResolution::Original as u8);
 static SELECTED_AUDIO_DEVICE: RwLock<Option<String>> = RwLock::new(None);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[repr(u8)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoFilter {
-    #[default]
-    Classic = 0,
-    Hqx = 1,
-    Xbrz = 2,
-    Crt = 3,
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[repr(u8)]
@@ -110,30 +98,6 @@ impl WorldRenderer {
             Self::Original => 1,
             Self::Supersampling2x => 2,
             Self::Supersampling4x => 4,
-        }
-    }
-}
-
-impl VideoFilter {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Hqx,
-            2 => Self::Xbrz,
-            3 => Self::Crt,
-            _ => Self::Classic,
-        }
-    }
-
-    pub fn next(self) -> Self {
-        Self::from_u8((self as u8 + 1) % 4)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Classic => "Classic",
-            Self::Hqx => "HQx 4x",
-            Self::Xbrz => "xBRZ 4x",
-            Self::Crt => "CRT Shader",
         }
     }
 }
@@ -270,8 +234,6 @@ struct AppSettings {
     #[serde(default)]
     show_historical_symbols: bool,
     #[serde(default)]
-    video_filter: VideoFilter,
-    #[serde(default)]
     high_resolution_renderer: bool,
     #[serde(default)]
     world_renderer: WorldRenderer,
@@ -388,7 +350,6 @@ pub fn load() -> Result<(), Box<dyn std::error::Error>> {
     MOUSE_INPUT_ENABLED.store(settings.mouse_input_enabled, Ordering::Relaxed);
     CONTROLLER_INPUT_ENABLED.store(settings.controller_input_enabled, Ordering::Relaxed);
     SHOW_HISTORICAL_SYMBOLS.store(settings.show_historical_symbols, Ordering::Relaxed);
-    VIDEO_FILTER.store(settings.video_filter as u8, Ordering::Relaxed);
     let world_renderer = if settings.high_resolution_renderer
         && settings.world_renderer == WorldRenderer::Original
     {
@@ -473,15 +434,6 @@ pub fn fullscreen_enabled() -> bool {
 
 pub fn window_scale() -> u8 {
     WINDOW_SCALE.load(Ordering::Relaxed)
-}
-
-pub fn video_filter() -> VideoFilter {
-    VideoFilter::from_u8(VIDEO_FILTER.load(Ordering::Relaxed))
-}
-
-pub fn set_video_filter(filter: VideoFilter) -> Result<(), Box<dyn std::error::Error>> {
-    VIDEO_FILTER.store(filter as u8, Ordering::Relaxed);
-    save()
 }
 
 pub fn world_renderer() -> WorldRenderer {
@@ -785,7 +737,6 @@ fn save() -> Result<(), Box<dyn std::error::Error>> {
         mouse_input_enabled: mouse_input_enabled(),
         controller_input_enabled: controller_input_enabled(),
         show_historical_symbols: show_historical_symbols(),
-        video_filter: video_filter(),
         high_resolution_renderer: world_renderer() != WorldRenderer::Original,
         world_renderer: world_renderer(),
         render_resolution: render_resolution(),

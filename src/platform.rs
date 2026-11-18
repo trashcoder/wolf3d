@@ -282,10 +282,8 @@ unsafe fn SDL_CreateTexture(
     SHARED_VIDEO.with(|shared| {
         let mut shared = shared.borrow_mut();
         if shared.texture.is_null() {
-            let scaled_width = width * crate::video_filters::SCALE as i32;
-            let scaled_height = height * crate::video_filters::SCALE as i32;
             shared.texture = unsafe {
-                SDL_CreateTextureNative(renderer, format, access, scaled_width, scaled_height)
+                SDL_CreateTextureNative(renderer, format, access, width, height)
             };
         }
         if !shared.texture.is_null() {
@@ -329,13 +327,12 @@ unsafe fn SDL_UpdateTexture(
     }
     let source =
         unsafe { std::slice::from_raw_parts(pixels, crate::world::WIDTH * crate::world::HEIGHT) };
-    let output = crate::video_filters::process_frame(source, crate::settings::video_filter());
     unsafe {
         SDL_UpdateTextureNative(
             texture,
             std::ptr::null(),
-            output.as_ptr(),
-            (crate::video_filters::OUTPUT_WIDTH * std::mem::size_of::<u32>()) as i32,
+            source.as_ptr(),
+            (crate::world::WIDTH * std::mem::size_of::<u32>()) as i32,
         )
     }
 }
@@ -1906,7 +1903,7 @@ fn button_action_name(action: u8) -> &'static str {
     }
 }
 
-fn runtime_pause_display_options() -> [String; 8] {
+fn runtime_pause_display_options() -> [String; 7] {
     let fullscreen = if crate::settings::fullscreen_enabled() {
         "ON"
     } else {
@@ -1917,7 +1914,6 @@ fn runtime_pause_display_options() -> [String; 8] {
         format!("FULLSCREEN: {fullscreen}"),
         format!("WINDOW SIZE: {width} X {height}"),
         format!("VIEW SIZE: {}", crate::settings::view_size()),
-        format!("IMAGE FILTER: {}", crate::settings::video_filter().label()),
         format!(
             "WORLD AA: {}",
             crate::settings::world_renderer().short_label()
@@ -6432,21 +6428,16 @@ fn run(
                                                 Some(PauseTransition::new(&pixels, false));
                                         }
                                         3 => {
-                                            crate::settings::set_video_filter(
-                                                crate::settings::video_filter().next(),
-                                            )?;
-                                        }
-                                        4 => {
                                             crate::settings::set_world_renderer(
                                                 crate::settings::world_renderer().next(),
                                             )?;
                                         }
-                                        5 => {
+                                        4 => {
                                             crate::settings::set_render_resolution(
                                                 crate::settings::render_resolution().next(),
                                             )?;
                                         }
-                                        6 => {
+                                        5 => {
                                             crate::settings::set_show_historical_symbols(
                                                 !crate::settings::show_historical_symbols(),
                                             )?;

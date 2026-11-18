@@ -302,15 +302,20 @@ The saved music setting marks the active choice; selecting AdLib/Sound Blaster
 restarts menu music after it was disabled. Mouse selection targets the
 corresponding half of the music row.
 The supplied WL1 graphics archive contains 144 picture entries, while the
-source `GFXV_WL1.EQU` table describes 136. Its extra pictures shift the first
-cursor and subsequent menu artwork by one chunk, then shift the status-bar and
-later pictures by eight total. The VGA reader detects this archive layout and
-maps source picture IDs to the matching archive chunks. This keeps the fixed
-`C_OPTIONSPIC` in place, draws `C_CURSOR1PIC` instead of the inserted OPTIONS
-title, and restores the intended `C_MOUSELBACKPIC` at the bottom of the menu.
-The mapping was checked against the decoded picture dimensions and DOS
-`DrawMainMenu`/Sound-menu draw calls. The startup cursor now uses the DOS
-`MainItems.x` position (76 pixels); runtime verification is still pending.
+source `GFXV_WL1.EQU` table describes 136. Its extra pictures shift cursor and
+menu artwork after `C_OPTIONSPIC` by one chunk, intermission artwork after
+`C_CODEPIC` by seven total, and status-bar and later pictures by eight total.
+The VGA reader detects this archive layout and maps source picture IDs to the
+matching archive chunks. The startup and pause menus explicitly load the
+152 × 48 Options title from archive chunk 22 and draw it at (84,0).
+The cursor sequence still starts at archive chunk 23. Menu text uses the DOS
+`MainItems.x + indent` position (100 pixels), the cursor starts at 72 pixels,
+and the mouse instruction strip is drawn at (112,184).
+The intermission glyphs and portrait now use the corrected WL1 chunk boundary
+as well; the user's malformed level-complete screen showed the shifted chunks
+as unrelated joystick and score graphics. The source mapping and decoded
+picture dimensions were rechecked, but visual runtime confirmation remains
+pending. The overall implementation estimate remains 88.0%.
 The startup Controls page opens the original `C_CONTROLPIC` panel with its
 checkboxes and six DOS-spaced rows. Its Customize Controls entry opens
 `C_CUSTOMIZEPIC` with the mouse-background picture and DOS title stripe, then
@@ -378,20 +383,10 @@ and the standalone episode and difficulty selectors.
 Mouse hover and left click navigate and select the startup, episode, difficulty,
 settings, and jukebox lists; pointer coordinates account for fullscreen
 letterboxing and high-DPI renderer scaling.
-The Display Settings persist a choice of `Classic`, `HQx 4x`, `xBRZ 4x`, or
-`CRT Shader`, available from startup and in-game. A shared output path enlarges
-the 320×200 framebuffer to 1280×800 before SDL presents it, preserving the
-4:3 display viewport and widescreen side bars. HQx and xBRZ use their pixel-art
-edge reconstruction algorithms; Classic uses nearest-neighbor replication.
-The CRT effect applies scanline attenuation and an RGB phosphor mask in a
-software shader pass so it works with the existing SDL backends on all targets.
-These are display filters and do not increase the renderer's internal scene
-detail. The earlier linear `Soft` option was removed because it visibly blurred
-pixel edges; settings saved with it fall back to `Classic`.
-The HQx dependency is LGPL-2.1-or-later; the Rust xBRZ port is GPL-3.0-only.
-These filters are part of the local feasibility study and are not included in
-any release or distribution package. The custom CRT shader calculations run in
-the software presentation path to keep behavior consistent across SDL targets.
+The Display Settings persist the world antialiasing and render resolution. SDL
+presents the rendered frame with nearest-neighbor scaling, preserving the 4:3
+display viewport and widescreen side bars. Higher render resolutions increase
+scene detail directly instead of applying a separate image filter.
 The in-game control panel and its sound, control, display, and save/load views use
 ten-tic fades for menu-to-menu changes. Entering the in-game control panel
 fades out over 30 DOS tics and its selected view fades in over ten. Returning
@@ -693,6 +688,35 @@ The build succeeded with 51 compiler warnings and its `--help` path ran
 successfully. No gameplay launch or visual filter check was run, so the new
 rendering modes still need the user's runtime review. The overall
 implementation estimate remains 88.0%.
+
+At the user's explicit request, a Linux x86-64 release build containing the
+WL1 intermission graphics-mapping correction was created on 2026-11-18 as
+`dist/linux-x86_64-preview/wolf3d-2026-11-18-intermission-fix`, beside the
+existing WL1 data files. The stripped ELF binary is 1,837,088 bytes with
+SHA-256 `d4e4dd16898b95761c227c97498677d20774c42d9aee44023ecbfe70bf47f258`.
+`cargo build --release --locked` succeeded with 51 compiler warnings, and its
+`--help` path ran successfully. No gameplay or visual runtime check was run;
+the intermission correction still needs visual confirmation. The overall
+implementation estimate remains 88.0%.
+
+At the user's explicit request, a new Linux x86-64 release build with the
+WL1 intermission mapping and main-menu cursor/text alignment was created on
+2026-11-18 as `dist/linux-x86_64-preview/wolf3d-2026-11-18-main-menu-fix`, next
+to the existing WL1 game data. The stripped ELF binary is 1,837,024 bytes with
+SHA-256 `aea0ab6b7216fdc13768c6f7beab51b6ba383236d1f2f86492d9654bce0b811c`.
+`cargo build --release --locked` succeeded with 51 compiler warnings, and its
+`--help` path ran successfully. No gameplay or visual runtime check was run;
+the user's main-menu review remains pending. The overall implementation
+estimate remains 88.0%.
+
+At the user's explicit request, a Linux x86-64 release build with the image
+filters removed and the current render-resolution settings was created on
+2026-11-18 as `dist/linux-x86_64-preview/wolf3d-2026-11-18-render-resolution`,
+beside the existing WL1 game data. The stripped ELF binary is 1,446,384 bytes
+with SHA-256
+`98504dcd05a9745ce2d1378a018f4416b2e554297674963368ff0c7a1e1ca076`.
+`cargo build --release --locked` succeeded with 51 compiler warnings, and its
+`--help` path ran successfully. No gameplay or visual runtime check was run.
 
 The SDL2 development library must be installed for each target. Linux release
 packages build in an Ubuntu 22.04 container on the current GitHub runner to

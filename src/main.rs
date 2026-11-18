@@ -17,7 +17,6 @@ mod signon;
 mod sprites;
 mod symbols;
 mod vga;
-mod video_filters;
 mod vswap;
 mod weapons;
 mod world;
@@ -141,7 +140,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             .picture(menu_background_chunk)?
             .ok_or("VGA menu background picture chunk is unexpectedly sparse")?;
         let main_menu_picture_base = if data.extension == "WL1" { 21 } else { 10 };
-        let main_menu_pictures = load_menu_pictures(&graphics, main_menu_picture_base, 3)?;
+        let mut main_menu_pictures = vec![graphics.options_title(main_menu_picture_base)?];
+        main_menu_pictures.extend(load_menu_pictures(
+            &graphics,
+            main_menu_picture_base + 1,
+            2,
+        )?);
         let difficulty_picture_base = if data.extension == "WL1" { 30 } else { 19 };
         let difficulty_pictures = load_menu_pictures(&graphics, difficulty_picture_base, 4)?;
         let status_bar_chunk = if data.extension == "WL1" { 90 } else { 86 };
@@ -489,7 +493,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 platform::window_size().1
                             ),
                             format!("View Size: {}", settings::view_size()),
-                            format!("Image Filter: {}", settings::video_filter().label()),
                             format!("World AA: {}", settings::world_renderer().short_label()),
                             format!(
                                 "Resolution: {}",
@@ -578,22 +581,19 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             platform::ChoiceMenuResult::Selected(3) => {
-                                settings::set_video_filter(settings::video_filter().next())?;
-                            }
-                            platform::ChoiceMenuResult::Selected(4) => {
                                 settings::set_world_renderer(settings::world_renderer().next())?;
                             }
-                            platform::ChoiceMenuResult::Selected(5) => {
+                            platform::ChoiceMenuResult::Selected(4) => {
                                 settings::set_render_resolution(
                                     settings::render_resolution().next(),
                                 )?;
                             }
-                            platform::ChoiceMenuResult::Selected(6) => {
+                            platform::ChoiceMenuResult::Selected(5) => {
                                 settings::set_show_historical_symbols(
                                     !settings::show_historical_symbols(),
                                 )?;
                             }
-                            platform::ChoiceMenuResult::Selected(7)
+                            platform::ChoiceMenuResult::Selected(6)
                             | platform::ChoiceMenuResult::Cancelled => break,
                             platform::ChoiceMenuResult::Quit => return Ok(()),
                             platform::ChoiceMenuResult::Selected(_)

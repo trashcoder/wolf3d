@@ -209,15 +209,30 @@ impl VgaArchive {
     }
 
     pub fn picture(&self, chunk_index: usize) -> Result<Option<Picture>, Box<dyn Error>> {
-        let archive_chunk_index = self.picture_archive_chunk(chunk_index);
-        let Some(picture_index) = archive_chunk_index.checked_sub(START_PICS) else {
+        self.picture_from_archive(self.picture_archive_chunk(chunk_index))
+    }
+
+    pub fn options_title(&self, source_chunk: usize) -> Result<Picture, Box<dyn Error>> {
+        // The extended WL1 archive stores the Options title between the
+        // shareware promo (21) and the first cursor frame (23).
+        let chunk = if self.wl1_extended_picture_layout {
+            22
+        } else {
+            source_chunk
+        };
+        self.picture_from_archive(chunk)?
+            .ok_or_else(|| VgaError(format!("VGA Options title chunk {chunk} is sparse")).into())
+    }
+
+    fn picture_from_archive(&self, chunk_index: usize) -> Result<Option<Picture>, Box<dyn Error>> {
+        let Some(picture_index) = chunk_index.checked_sub(START_PICS) else {
             return Err(VgaError(format!("VGA chunk {chunk_index} is not a picture")).into());
         };
         let (width, height) = *self
             .picture_sizes
             .get(picture_index)
             .ok_or_else(|| VgaError(format!("VGA picture chunk {chunk_index} is out of range")))?;
-        let Some(pixels) = self.chunk(archive_chunk_index)? else {
+        let Some(pixels) = self.chunk(chunk_index)? else {
             return Ok(None);
         };
         let required = width * height;
@@ -257,12 +272,14 @@ impl VgaArchive {
         }
 
         // This WL1 archive contains eight more pictures than the source
-        // GFXV_WL1.EQU table. One was inserted after C_OPTIONSPIC and seven
-        // before STATUSBARPIC, shifting the original picture IDs in those
-        // ranges while leaving the opening menu artwork untouched.
+        // GFXV_WL1.EQU table: one after C_OPTIONSPIC, six after C_CODEPIC,
+        // and one before STATUSBARPIC. Keep each insertion at its actual
+        // boundary so the intermission portrait and glyphs do not resolve to
+        // unrelated pictures.
         match source_chunk {
             0..=21 => source_chunk,
-            22..=89 => source_chunk + 1,
+            22..=47 => source_chunk + 1,
+            48..=89 => source_chunk + 7,
             _ => source_chunk + (WL1_EXTENDED_PICTURE_COUNT - WL1_SOURCE_PICTURE_COUNT),
         }
     }

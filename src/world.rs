@@ -158,7 +158,7 @@ impl PauseSoundMenuPictures {
         };
         Ok(Self {
             paused: load_picture(paused_chunk)?,
-            options_panel: load_picture(options_panel_chunk)?,
+            options_panel: archive.options_title(options_panel_chunk)?,
             control_panel: load_picture(control_panel_chunk)?,
             customize_panel: load_picture(customize_panel_chunk)?,
             load_game: load_picture(load_game_chunk)?,
@@ -1986,7 +1986,6 @@ pub fn render_choice_menu(
     pixels[..WIDTH * HEIGHT].fill(palette_color(0x2d, 1.0));
     match layout {
         ChoiceMenuLayout::Main | ChoiceMenuLayout::StartupMain => {
-            let startup_main = layout == ChoiceMenuLayout::StartupMain;
             // Match DOS DrawMainMenu: title strip, OPTIONS artwork, and the
             // 10-item menu window. The modern menu exposes fewer entries, so
             // keep the original window bounds while rendering only available
@@ -2014,16 +2013,18 @@ pub fn render_choice_menu(
                 let y = 55 + index * 13;
                 if index == selected {
                     if let Some(cursor) = illustrations.get(1 + cursor_frame.min(1)) {
-                        draw_picture(cursor, 76, y.saturating_sub(2), pixels);
+                        // WL_MENU.C's HandleMenu aligns the cursor to
+                        // iteminfo.x & -8 (76 rounded down to 72).
+                        draw_picture(cursor, 72, y.saturating_sub(2), pixels);
                     } else {
-                        font.draw_text(pixels, WIDTH, HEIGHT, 76, y, ">", palette_color(0x13, 1.0));
+                        font.draw_text(pixels, WIDTH, HEIGHT, 72, y, ">", palette_color(0x13, 1.0));
                     }
                 }
                 font.draw_text(
                     pixels,
                     WIDTH,
                     HEIGHT,
-                    if startup_main { 100 } else { 86 },
+                    100,
                     y,
                     option,
                     palette_color(if index == selected { 0x13 } else { 0x17 }, 1.0),

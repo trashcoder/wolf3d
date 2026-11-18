@@ -9,6 +9,14 @@ use crate::{
     vga::{BitmapFont, Picture},
     vswap::Vswap,
 };
+use std::{
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Instant,
+};
 
 pub const WIDTH: usize = 320;
 pub const HEIGHT: usize = 200;
@@ -517,6 +525,7 @@ pub fn render(
     hud_text: &str,
     pixels: &mut [u32],
 ) -> Option<(usize, usize, Vec<u32>)> {
+    let profile_started = profiling_enabled().then(Instant::now);
     if pixels.len() < WIDTH * HEIGHT {
         return None;
     }
@@ -527,6 +536,7 @@ pub fn render(
     let renderer = crate::settings::world_renderer();
     let sample_count = renderer.sample_count();
     let subpixel_rendering = sample_count > 1;
+    let ray_origin = view_origin(player);
     draw_play_border(pixels, viewport);
     let mut wall_depths = vec![f64::INFINITY; WIDTH];
     let mut visible_tiles = vec![false; map.width * map.height];
@@ -538,17 +548,28 @@ pub fn render(
             let sample_offset = (sample_index as f64 + 0.5) / sample_count as f64;
             let pixel_offset = view_x as f64 + sample_offset - viewport.width as f64 / 2.0;
             let ray_angle = player.angle + (pixel_offset / focal).atan();
-            let hit = cast_ray(
+            let hit = cast_ray_from_origin(
                 map,
                 doors,
                 pushwalls,
-                player,
+                ray_origin,
                 ray_angle,
                 pushwalls.tilemap_blocking_cell(),
                 &mut visible_tiles,
             );
             let corrected = (hit.distance * (ray_angle - player.angle).cos()).max(0.05);
             sample_depths[sample_index] = corrected;
+            let wall = prepare_wall_sampler(
+                &hit,
+                corrected,
+                viewport,
+                focal,
+                ceiling,
+                textures,
+                doors,
+                show_historical_symbols,
+                subpixel_rendering,
+            );
             for (row, y) in (viewport.top..viewport.bottom).enumerate() {
                 for vertical_index in 0..sample_count {
                     let vertical_offset = if subpixel_rendering {
@@ -556,18 +577,8 @@ pub fn render(
                     } else {
                         0.0
                     };
-                    sample_columns[sample_index][vertical_index][row] = wall_sample_color(
-                        y as f64 + vertical_offset,
-                        &hit,
-                        corrected,
-                        viewport,
-                        focal,
-                        ceiling,
-                        textures,
-                        doors,
-                        show_historical_symbols,
-                        subpixel_rendering,
-                    );
+                    sample_columns[sample_index][vertical_index][row] =
+                        wall.color_at(y as f64 + vertical_offset);
                 }
             }
         }
@@ -614,8 +625,9 @@ pub fn render(
     } else if let Some(font) = font {
         font.draw_text(pixels, WIDTH, HEIGHT, 4, hud_y, hud_text, 0xFFFFFFFF);
     }
+    let base_render_ns = profile_started.map(|started| started.elapsed().as_nanos() as u64);
     let scale = crate::settings::render_resolution().scale();
-    (scale > 1).then(|| {
+    let high_resolution_frame = (scale > 1).then(|| {
         let frame = render_scaled_scene(
             scale,
             map,
@@ -630,7 +642,57 @@ pub fn render(
             pixels,
         );
         (WIDTH * scale, HEIGHT * scale, frame)
-    })
+    });
+    if let (Some(started), Some(base_ns)) = (profile_started, base_render_ns) {
+        record_render_profile(
+            base_ns,
+            started.elapsed().as_nanos() as u64 - base_ns,
+            scale,
+        );
+    }
+    high_resolution_frame
+}
+
+fn profiling_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WOLF3D_PROFILE_RENDER").is_some())
+}
+
+fn record_render_profile(base_ns: u64, high_resolution_ns: u64, scale: usize) {
+    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+    static BASE_NS: AtomicU64 = AtomicU64::new(0);
+    static HIGH_RES_NS: AtomicU64 = AtomicU64::new(0);
+    BASE_NS.fetch_add(base_ns, Ordering::Relaxed);
+    HIGH_RES_NS.fetch_add(high_resolution_ns, Ordering::Relaxed);
+    let frames = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if frames == 120 {
+        let base_ms = BASE_NS.swap(0, Ordering::Relaxed) as f64 / 120_000_000.0;
+        let high_res_ms = HIGH_RES_NS.swap(0, Ordering::Relaxed) as f64 / 120_000_000.0;
+        FRAMES.store(0, Ordering::Relaxed);
+        eprintln!(
+            "[render profile, 120 frames] base={base_ms:.2} ms/frame, high-resolution={high_res_ms:.2} ms/frame (scale {scale})"
+        );
+    }
+}
+
+fn record_scaled_scene_profile(upscale_ns: u64, walls_ns: u64, overlays_ns: u64, scale: usize) {
+    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+    static UPSCALE_NS: AtomicU64 = AtomicU64::new(0);
+    static WALLS_NS: AtomicU64 = AtomicU64::new(0);
+    static OVERLAYS_NS: AtomicU64 = AtomicU64::new(0);
+    UPSCALE_NS.fetch_add(upscale_ns, Ordering::Relaxed);
+    WALLS_NS.fetch_add(walls_ns, Ordering::Relaxed);
+    OVERLAYS_NS.fetch_add(overlays_ns, Ordering::Relaxed);
+    let frames = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if frames == 120 {
+        let upscale_ms = UPSCALE_NS.swap(0, Ordering::Relaxed) as f64 / 120_000_000.0;
+        let walls_ms = WALLS_NS.swap(0, Ordering::Relaxed) as f64 / 120_000_000.0;
+        let overlays_ms = OVERLAYS_NS.swap(0, Ordering::Relaxed) as f64 / 120_000_000.0;
+        FRAMES.store(0, Ordering::Relaxed);
+        eprintln!(
+            "[supersampling profile, 120 frames] base-image={upscale_ms:.2} ms/frame, rays-and-walls={walls_ms:.2} ms/frame, sprites-and-weapon={overlays_ms:.2} ms/frame (scale {scale})"
+        );
+    }
 }
 
 fn render_scaled_scene(
@@ -646,69 +708,81 @@ fn render_scaled_scene(
     player_weapon_shape: Option<usize>,
     base_frame: &[u32],
 ) -> Vec<u32> {
+    let profile_started = profiling_enabled().then(Instant::now);
     let width = WIDTH * scale;
     let height = HEIGHT * scale;
     let mut pixels = vec![0xff00_0000; width * height];
-    for y in 0..height {
-        let source_row = (y / scale) * WIDTH;
-        let target_row = y * width;
-        for x in 0..width {
-            pixels[target_row + x] = base_frame[source_row + x / scale];
+    for source_y in 0..HEIGHT {
+        let source_row = source_y * WIDTH;
+        for vertical_sample in 0..scale {
+            let target_row = (source_y * scale + vertical_sample) * width;
+            for source_x in 0..WIDTH {
+                let target_x = source_x * scale;
+                pixels[target_row + target_x..target_row + target_x + scale]
+                    .fill(base_frame[source_row + source_x]);
+            }
         }
     }
+    let upscale_ns = profile_started.map(|started| started.elapsed().as_nanos() as u64);
     let viewport = Viewport::scaled(scale);
     let focal = viewport.width as f64 * VIEW_FACE_DISTANCE;
+    let ray_origin = view_origin(player);
     let ceiling = CEILING_COLORS.get(map.number).copied().unwrap_or(0x1d);
     let show_historical_symbols = crate::settings::show_historical_symbols();
     let sample_count = crate::settings::world_renderer().sample_count();
+    let worker_count = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(viewport.width)
+        .max(1);
+    let columns_per_worker = viewport.width.div_ceil(worker_count);
+    let chunks = thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            let x_start = viewport.left + worker * columns_per_worker;
+            let x_end = (x_start + columns_per_worker).min(viewport.right);
+            if x_start >= x_end {
+                break;
+            }
+            workers.push(scope.spawn(move || {
+                render_scaled_columns(
+                    x_start,
+                    x_end,
+                    map,
+                    textures,
+                    doors,
+                    pushwalls,
+                    player,
+                    ray_origin,
+                    viewport,
+                    focal,
+                    ceiling,
+                    sample_count,
+                    show_historical_symbols,
+                )
+            }));
+        }
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("scaled renderer worker panicked"))
+            .collect::<Vec<_>>()
+    });
     let mut wall_depths = vec![f64::INFINITY; width];
     let mut visible_tiles = vec![false; map.width * map.height];
-    for x in viewport.left..viewport.right {
-        let view_x = x - viewport.left;
-        let mut sample_depths = [f64::INFINITY; 4];
-        let mut sample_columns = [[[0xff00_0000; HEIGHT * 4]; 4]; 4];
-        for horizontal in 0..sample_count {
-            let pixel_offset = view_x as f64 + (horizontal as f64 + 0.5) / sample_count as f64
-                - viewport.width as f64 / 2.0;
-            let ray_angle = player.angle + (pixel_offset / focal).atan();
-            let hit = cast_ray(
-                map,
-                doors,
-                pushwalls,
-                player,
-                ray_angle,
-                pushwalls.tilemap_blocking_cell(),
-                &mut visible_tiles,
-            );
-            let corrected = (hit.distance * (ray_angle - player.angle).cos()).max(0.05);
-            sample_depths[horizontal] = corrected;
-            for (row, y) in (viewport.top..viewport.bottom).enumerate() {
-                for vertical in 0..sample_count {
-                    let sample_y = y as f64 + (vertical as f64 + 0.5) / sample_count as f64;
-                    sample_columns[horizontal][vertical][row] = wall_sample_color(
-                        sample_y,
-                        &hit,
-                        corrected,
-                        viewport,
-                        focal,
-                        ceiling,
-                        textures,
-                        doors,
-                        show_historical_symbols,
-                        true,
-                    );
-                }
-            }
-        }
+    for chunk in chunks {
+        let chunk_width = chunk.x_end - chunk.x_start;
         for row in 0..viewport.height {
-            pixels[(viewport.top + row) * width + x] =
-                average_sample_grid(&sample_columns, sample_count, row);
+            let target_start = (viewport.top + row) * width + chunk.x_start;
+            let source_start = row * chunk_width;
+            pixels[target_start..target_start + chunk_width]
+                .copy_from_slice(&chunk.pixels[source_start..source_start + chunk_width]);
         }
-        wall_depths[x] = sample_depths[..sample_count]
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        wall_depths[chunk.x_start..chunk.x_end].copy_from_slice(&chunk.wall_depths);
+        for (visible, chunk_visible) in visible_tiles.iter_mut().zip(chunk.visible_tiles) {
+            *visible |= chunk_visible;
+        }
     }
+    let wall_end_ns = profile_started.map(|started| started.elapsed().as_nanos() as u64);
     draw_statics(
         statics,
         enemies,
@@ -726,7 +800,102 @@ fn render_scaled_scene(
     if let Some(sprite) = player_weapon_shape.and_then(|shape| sprites.sprite(shape)) {
         draw_player_weapon(sprite, viewport, width, pixels.as_mut_slice());
     }
+    if let (Some(started), Some(upscale_ns), Some(wall_end_ns)) =
+        (profile_started, upscale_ns, wall_end_ns)
+    {
+        let total_ns = started.elapsed().as_nanos() as u64;
+        record_scaled_scene_profile(
+            upscale_ns,
+            wall_end_ns - upscale_ns,
+            total_ns - wall_end_ns,
+            scale,
+        );
+    }
     pixels
+}
+
+struct ScaledColumnChunk {
+    x_start: usize,
+    x_end: usize,
+    pixels: Vec<u32>,
+    wall_depths: Vec<f64>,
+    visible_tiles: Vec<bool>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_scaled_columns(
+    x_start: usize,
+    x_end: usize,
+    map: &Map,
+    textures: Option<&Vswap>,
+    doors: &DoorSystem,
+    pushwalls: &PushWallSystem,
+    player: &Player,
+    ray_origin: (f64, f64),
+    viewport: Viewport,
+    focal: f64,
+    ceiling: u8,
+    sample_count: usize,
+    show_historical_symbols: bool,
+) -> ScaledColumnChunk {
+    let chunk_width = x_end - x_start;
+    let mut pixels = vec![0xff00_0000; chunk_width * viewport.height];
+    let mut wall_depths = vec![f64::INFINITY; chunk_width];
+    let mut visible_tiles = vec![false; map.width * map.height];
+    for x in x_start..x_end {
+        let view_x = x - viewport.left;
+        let mut sample_depths = [f64::INFINITY; 4];
+        let mut sample_columns = [[[0xff00_0000; HEIGHT * 4]; 4]; 4];
+        for horizontal in 0..sample_count {
+            let pixel_offset = view_x as f64 + (horizontal as f64 + 0.5) / sample_count as f64
+                - viewport.width as f64 / 2.0;
+            let ray_angle = player.angle + (pixel_offset / focal).atan();
+            let hit = cast_ray_from_origin(
+                map,
+                doors,
+                pushwalls,
+                ray_origin,
+                ray_angle,
+                pushwalls.tilemap_blocking_cell(),
+                &mut visible_tiles,
+            );
+            let corrected = (hit.distance * (ray_angle - player.angle).cos()).max(0.05);
+            sample_depths[horizontal] = corrected;
+            let wall = prepare_wall_sampler(
+                &hit,
+                corrected,
+                viewport,
+                focal,
+                ceiling,
+                textures,
+                doors,
+                show_historical_symbols,
+                true,
+            );
+            for (row, y) in (viewport.top..viewport.bottom).enumerate() {
+                for vertical in 0..sample_count {
+                    let sample_y = y as f64 + (vertical as f64 + 0.5) / sample_count as f64;
+                    sample_columns[horizontal][vertical][row] = wall.color_at(sample_y);
+                }
+            }
+        }
+        let local_x = x - x_start;
+        for row in 0..viewport.height {
+            pixels[row * chunk_width + local_x] =
+                average_sample_grid(&sample_columns, sample_count, row);
+        }
+        wall_depths[local_x] = sample_depths[..sample_count]
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+    }
+    ScaledColumnChunk {
+        x_start,
+        x_end,
+        pixels,
+        wall_depths,
+        visible_tiles,
+    }
 }
 
 fn draw_play_border(pixels: &mut [u32], view: Viewport) {
@@ -2534,29 +2703,66 @@ pub(crate) fn draw_picture(picture: &Picture, x: usize, y: usize, pixels: &mut [
     }
 }
 
-fn wall_sample_color(
-    y: f64,
+struct WallSampler<'a> {
+    top: f64,
+    wall_height: f64,
+    ceiling: u8,
+    tile: u16,
+    page: Option<usize>,
+    texture: Option<&'a [u8]>,
+    texture_x: usize,
+    show_historical_symbols: bool,
+}
+
+impl WallSampler<'_> {
+    fn color_at(&self, y: f64) -> u32 {
+        if y < self.top {
+            return palette_color(self.ceiling, 1.0);
+        }
+        if y >= self.top + self.wall_height {
+            return palette_color(FLOOR_COLOR, 1.0);
+        }
+        if let (Some(texture), Some(page)) = (self.texture, self.page) {
+            let v = (((y - self.top) * 64.0) / self.wall_height.max(1.0)).clamp(0.0, 63.0) as usize;
+            let source = texture[self.texture_x * 64 + v];
+            palette_color(
+                crate::symbols::wall_pixel(
+                    self.show_historical_symbols,
+                    page,
+                    self.texture_x,
+                    v,
+                    source,
+                ),
+                1.0,
+            )
+        } else {
+            let intensity = 220u32;
+            let tint = 24 + (self.tile as u32 % 4) * 12;
+            let red = intensity;
+            let green = intensity.saturating_sub(tint);
+            let blue = intensity.saturating_sub(tint * 2);
+            0xFF000000 | (red << 16) | (green << 8) | blue
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_wall_sampler<'a>(
     hit: &RayHit,
     corrected: f64,
     viewport: Viewport,
     focal: f64,
     ceiling: u8,
-    textures: Option<&Vswap>,
+    textures: Option<&'a Vswap>,
     doors: &DoorSystem,
     show_historical_symbols: bool,
     subpixel_rendering: bool,
-) -> u32 {
+) -> WallSampler<'a> {
     let mut wall_height = (focal / corrected).min((viewport.height * 2) as f64);
     let mut top = viewport.top as f64 + (viewport.height as f64 - wall_height) / 2.0;
     if !subpixel_rendering {
         wall_height = wall_height as isize as f64;
         top = top as isize as f64;
-    }
-    if y < top {
-        return palette_color(ceiling, 1.0);
-    }
-    if y >= top + wall_height {
-        return palette_color(FLOOR_COLOR, 1.0);
     }
     let page = if let (Some(index), Some(archive)) = (hit.door, textures) {
         doors
@@ -2573,20 +2779,15 @@ fn wall_sample_color(
         .and_then(|index| doors.doors.get(index))
         .map(|door| (hit.door_texture_x + 64 - (door.position as usize >> 10)) & 63)
         .unwrap_or(hit.texture_x);
-    if let (Some(texture), Some(page)) = (texture, page) {
-        let v = (((y - top) * 64.0) / wall_height.max(1.0)).clamp(0.0, 63.0) as usize;
-        let source = texture[texture_x * 64 + v];
-        palette_color(
-            crate::symbols::wall_pixel(show_historical_symbols, page, texture_x, v, source),
-            1.0,
-        )
-    } else {
-        let intensity = 220u32;
-        let tint = 24 + (hit.tile as u32 % 4) * 12;
-        let red = intensity;
-        let green = intensity.saturating_sub(tint);
-        let blue = intensity.saturating_sub(tint * 2);
-        0xFF000000 | (red << 16) | (green << 8) | blue
+    WallSampler {
+        top,
+        wall_height,
+        ceiling,
+        tile: hit.tile,
+        page,
+        texture,
+        texture_x,
+        show_historical_symbols,
     }
 }
 
@@ -2879,8 +3080,27 @@ fn cast_ray(
     visibility_blocking_tile: Option<(usize, usize)>,
     visible: &mut [bool],
 ) -> RayHit {
-    let (dx, dy) = (angle.cos(), angle.sin());
-    let (origin_x, origin_y) = view_origin(player);
+    cast_ray_from_origin(
+        map,
+        doors,
+        pushwalls,
+        view_origin(player),
+        angle,
+        visibility_blocking_tile,
+        visible,
+    )
+}
+
+fn cast_ray_from_origin(
+    map: &Map,
+    doors: &DoorSystem,
+    pushwalls: &PushWallSystem,
+    (origin_x, origin_y): (f64, f64),
+    angle: f64,
+    visibility_blocking_tile: Option<(usize, usize)>,
+    visible: &mut [bool],
+) -> RayHit {
+    let (dy, dx) = angle.sin_cos();
     let pushwall_hit = pushwalls.ray_hit(origin_x, origin_y, dx, dy);
     let (mut map_x, mut map_y) = (origin_x.floor() as isize, origin_y.floor() as isize);
     let delta_x = if dx == 0.0 {
